@@ -1,9 +1,8 @@
-import { useState, useEffect, createContext, useContext } from 'react';
+import { useState, useEffect, createContext, useContext, useRef } from 'react';
 import { initializeApp } from 'firebase/app';
-import type { FirebaseApp } from 'firebase/app'; // Type-only import
+import type { FirebaseApp } from 'firebase/app';
 import {
   getAuth,
-  signInAnonymously,
   signInWithCustomToken,
   onAuthStateChanged,
   createUserWithEmailAndPassword,
@@ -11,7 +10,7 @@ import {
   signOut,
   updateProfile,
 } from 'firebase/auth';
-import type { User, Auth } from 'firebase/auth'; // Type-only imports for User and Auth
+import type { User, Auth } from 'firebase/auth';
 import {
   getFirestore,
   doc,
@@ -22,33 +21,52 @@ import {
   onSnapshot,
   serverTimestamp,
   deleteDoc,
+  Timestamp,
 } from 'firebase/firestore';
-import type { Firestore, Timestamp } from 'firebase/firestore'; // Type-only imports for Firestore and Timestamp
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
+import type { Firestore } from 'firebase/firestore';
+
+// Import Recharts components
+import {
+  ResponsiveContainer,
+  LineChart,
+  CartesianGrid,
+  XAxis,
+  YAxis,
+  Tooltip,
+  Legend,
+  Line
+} from 'recharts';
 
 // --- Global Variable Declarations for Canvas Environment ---
-// Declare these global variables so TypeScript recognizes them.
 declare const __app_id: string | undefined;
 declare const __firebase_config: string | undefined;
 declare const __initial_auth_token: string | undefined;
 
 // --- Firebase Configuration and Initialization ---
-// Global variables provided by the Canvas environment
 const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
 
-// Using the Firebase configuration provided by the environment or a fallback
-const firebaseConfigRaw = typeof __firebase_config !== 'undefined' ? __firebase_config : '{"apiKey": "AIzaSyCjjrUEhfPiWgj_ErXBnqva9o8vs8am9tg", "authDomain": "spenditure-f7819.firebaseapp.com", "projectId": "spenditure-f7819", "storageBucket": "spenditure-f7819.firebasestorage.app", "messagingSenderId": "912399104178", "appId": "1:912399104178:web:57adc527981147fd6731ab", "measurementId": "G-0LPD65KQFG"}';
-const firebaseConfig = JSON.parse(firebaseConfigRaw);
+const firebaseConfigRaw = typeof __firebase_config !== 'undefined' ? __firebase_config : '{"apiKey": "AIzaSyCjjrUEhfPiWgj_ErXBnqva9o8vs8am9tg", "authDomain": "spenditure-f7819.firebaseapp.com", "projectId": "spenditure-f7819", "storageBucket": "spenditure-f7819.firebase-app.com", "messagingSenderId": "912399104178", "appId": "1:912399104178:web:57adc5279811477fd6731ab", "measurementId": "G-0LPD65KQFG"}';
+
+let app: FirebaseApp | null = null;
+let auth: Auth | null = null;
+let db: Firestore | null = null;
+
+try {
+  const firebaseConfig = JSON.parse(firebaseConfigRaw);
+  app = initializeApp(firebaseConfig);
+  auth = getAuth(app);
+  db = getFirestore(app);
+} catch (e: unknown) {
+  console.error("Failed to initialize Firebase:", e);
+  let errorMessage = "An unknown error occurred during Firebase initialization.";
+  if (e instanceof Error) {
+    errorMessage = `Firebase Initialization Error: ${e.message}`;
+  }
+}
 
 const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
 
-// Initialize Firebase app and services
-const app: FirebaseApp = initializeApp(firebaseConfig);
-const auth: Auth = getAuth(app);
-const db: Firestore = getFirestore(app);
-
 // --- TypeScript Interfaces for Data Structures ---
-
 interface BankAccount {
   id: string;
   bankName: string;
@@ -56,8 +74,8 @@ interface BankAccount {
   last4Digits: string;
   expirationDate?: string;
   amount: number;
-  createdAt?: Timestamp | Date; // Firestore Timestamp or Date object
-  lastUpdated?: Timestamp | Date; // Firestore Timestamp or Date object
+  createdAt?: Timestamp | Date;
+  lastUpdated?: Timestamp | Date;
 }
 
 interface IncomeEntry {
@@ -94,10 +112,20 @@ interface SalaryDetails {
   lastUpdated?: Date | Timestamp;
 }
 
+interface UserProfile {
+  name: string;
+  email: string;
+  phoneNumber?: string;
+  receiveEmailNotifications: boolean;
+  receivePhoneNotifications: boolean;
+  createdAt?: Timestamp | Date;
+  lastUpdated?: Timestamp | Date;
+}
+
 interface AuthContextType {
   user: User | null;
   handleLogout: () => Promise<void>;
-  db: Firestore;
+  db: Firestore | null;
   appId: string;
   setIsLoading: React.Dispatch<React.SetStateAction<boolean>>;
   totalBankBalance: number;
@@ -116,7 +144,6 @@ const AuthContext = createContext<AuthContextType | null>(null);
 const useAuth = () => {
   const context = useContext(AuthContext);
   if (!context) {
-    // This should ideally not happen if AuthProvider wraps the entire app correctly
     throw new Error('useAuth must be used within an AuthContext.Provider');
   }
   return context;
@@ -126,7 +153,6 @@ const useAuth = () => {
 
 /**
  * LoadingSpinner Component
- * A simple spinner to indicate loading states.
  */
 const LoadingSpinner = () => (
   <div className="flex justify-center items-center h-full">
@@ -136,10 +162,9 @@ const LoadingSpinner = () => (
 
 /**
  * FullPageSpinnerOverlay Component
- * An overlay that covers the entire page and shows a spinner.
  */
 const FullPageSpinnerOverlay = () => (
-  <div className="fixed inset-0 bg-gray-900 bg-opacity-75 flex justify-center items-center z-[1000]">
+  <div className="fixed inset-0 flex justify-center items-center z-[1000]" style={{ backgroundColor: 'rgba(0, 0, 0, 0.75)' }}>
     <LoadingSpinner />
   </div>
 );
@@ -147,7 +172,6 @@ const FullPageSpinnerOverlay = () => (
 
 /**
  * MessageBox Component
- * A custom modal for displaying messages (errors, success, info) instead of alert().
  */
 const MessageBox = ({ message, type, onClose }: { message: string; type: 'success' | 'error' | 'info'; onClose: () => void }) => {
   if (!message) return null;
@@ -189,16 +213,19 @@ const MessageBox = ({ message, type, onClose }: { message: string; type: 'succes
 
 /**
  * Auth Component
- * Handles user login and sign-up forms.
  */
 const Auth = () => {
   const [isLoginMode, setIsLoginMode] = useState(true);
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
-  const [isLoading, setIsLoading] = useState(false); // Local loading for Auth component
+  const [isLoading, setIsLoading] = useState(false);
   const [message, setMessage] = useState('');
   const [messageType, setMessageType] = useState<'success' | 'error' | 'info'>('info');
+
+  if (!auth || !db) {
+    return <MessageBox message="Firebase is not initialized. Please check console for errors." type="error" onClose={() => {}} />;
+  }
 
   const handleAuth = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -207,34 +234,34 @@ const Auth = () => {
 
     try {
       if (isLoginMode) {
-        // Login functionality
         await signInWithEmailAndPassword(auth, email, password);
         setMessageType('success');
         setMessage('Login successful!');
       } else {
-        // Sign-up functionality
         const userCredential = await createUserWithEmailAndPassword(auth, email, password);
         if (userCredential.user) {
           await updateProfile(userCredential.user, { displayName: name });
 
-          // Save user data to Firestore (optional, but good for storing additional user info)
           const userDocRef = doc(db, `artifacts/${appId}/users/${userCredential.user.uid}/profile/details`);
-          await setDoc(userDocRef, {
+          const initialProfileData: UserProfile = {
             name: name,
             email: email,
-            createdAt: new Date(),
-          });
+            phoneNumber: '',
+            receiveEmailNotifications: true,
+            receivePhoneNotifications: false,
+            createdAt: serverTimestamp(),
+          };
+          await setDoc(userDocRef, initialProfileData);
         }
-
 
         setMessageType('success');
         setMessage('Sign-up successful! You are now logged in.');
       }
-    } catch (error: unknown) { // Explicitly type error as unknown
+    } catch (error: unknown) {
       setMessageType('error');
       let errorMessage = 'An unknown error occurred.';
-      if (error instanceof Error) { // Use instanceof Error and check for 'code' property
-        const firebaseErrorCode = (error as { code?: string }).code; // Safely access code property
+      if (error instanceof Error) {
+        const firebaseErrorCode = (error as { code?: string }).code;
         if (firebaseErrorCode === 'auth/email-already-in-use') {
           errorMessage = 'Email already in use. Try logging in or use a different email.';
         } else if (firebaseErrorCode === 'auth/invalid-email') {
@@ -339,58 +366,141 @@ const Auth = () => {
 };
 
 /**
- * Navbar Component
- * Provides navigation links and logout functionality.
+ * Sidebar Component
  */
-const Navbar = ({ setCurrentPage, user }: { setCurrentPage: (page: string) => void; user: User | null }) => {
-  const { handleLogout } = useAuth(); // useAuth now returns AuthContextType which has handleLogout
+const Sidebar = ({ isOpen, onClose, setCurrentPage, user, handleLogout }: {
+  isOpen: boolean;
+  onClose: () => void;
+  setCurrentPage: (page: string) => void;
+  user: User | null;
+  handleLogout: () => Promise<void>;
+}) => {
+  const sidebarRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (sidebarRef.current && !sidebarRef.current.contains(event.target as Node) && isOpen) {
+        onClose();
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+    };
+  }, [isOpen, onClose]);
+
   const userName = user?.displayName || user?.email || 'Guest';
 
+  const navItems = [
+    { name: 'Dashboard', page: 'dashboard' },
+    { name: 'Banks', page: 'banks' },
+    { name: 'Incomes', page: 'incomes' },
+    { name: 'Salary', page: 'salary' },
+    { name: 'Expenses', page: 'expenses' },
+    { name: 'Profile', page: 'profile' },
+    { name: 'History', page: 'history' },
+  ];
+
   return (
-    <nav className="bg-gray-800 p-4 shadow-lg">
-      <div className="container mx-auto flex flex-col md:flex-row justify-between items-center space-y-4 md:space-y-0">
-        <div className="flex items-center space-x-3">
-          <svg className="h-8 w-8 text-purple-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M17 9V7a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2m2 4h10a2 2 0 002-2v-6a2 2 0 00-2-2H9a2 2 0 00-2 2v6a2 2 0 002 2zm7-5a2 2 0 11-4 0 2 2 0 014 0z" />
-          </svg>
-          <span className="text-white text-xl font-bold tracking-wide">Expense Tracker</span>
-        </div>
-        <div className="flex flex-wrap justify-center md:justify-start items-center space-x-4">
-          {[
-            { name: 'Dashboard', page: 'dashboard' },
-            { name: 'Banks', page: 'banks' },
-            { name: 'Incomes', page: 'incomes' },
-            { name: 'Salary', page: 'salary' },
-            { name: 'Expenses', page: 'expenses' },
-            { name: 'Profile', page: 'profile' },
-            { name: 'History', page: 'history' }, // New History Page
-          ].map((item) => (
-            <button
-              key={item.page}
-              onClick={() => setCurrentPage(item.page)}
-              className="text-gray-300 hover:text-white px-3 py-2 rounded-md text-sm font-medium transition duration-300 ease-in-out hover:bg-gray-700"
-            >
-              {item.name}
+    <>
+      {/* Overlay */}
+      {isOpen && (
+        <div
+          className="fixed inset-0 z-40 animate-fade-in"
+          style={{ backgroundColor: 'rgba(0, 0, 0, 0.25)' }}
+          onClick={onClose}
+        ></div>
+      )}
+
+      {/* Sidebar */}
+      <div
+        ref={sidebarRef}
+        className={`fixed inset-y-0 left-0 w-64 bg-gray-800 text-white shadow-xl z-50 transform transition-transform duration-300 ease-in-out
+          ${isOpen ? 'translate-x-0' : '-translate-x-full'}`}
+      >
+        <div className="p-4 flex flex-col h-full">
+          {/* Header */}
+          <div className="flex justify-between items-center pb-4 border-b border-gray-700 mb-4">
+            <div className="flex items-center space-x-2">
+              {/* Updated logo source to use a generic LOGO placeholder image */}
+              <img src="https://placehold.co/100x40/6b46c1/ffffff?text=LOGO" alt="Spendt Logo" className="h-8 w-auto rounded-md" onError={(e) => {
+                const target = e.target as HTMLImageElement;
+                target.onerror = null; // Prevent infinite loop if fallback also fails
+                target.src = "https://placehold.co/40x40/6b46c1/ffffff?text=LOGO"; // Fallback placeholder
+              }} />
+            </div>
+            <button onClick={onClose} className="text-gray-400 hover:text-white transition duration-200">
+              <svg className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
+              </svg>
             </button>
-          ))}
-        </div>
-        <div className="flex items-center space-x-4">
-          <span className="text-white text-sm">Hello, {userName}</span>
-          <button
-            onClick={handleLogout}
-            className="bg-purple-600 text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-purple-700 transition duration-300 ease-in-out transform hover:scale-105"
-          >
-            Logout
-          </button>
+          </div>
+
+          {/* Navigation Links */}
+          <nav className="flex-grow">
+            <ul className="space-y-2">
+              {navItems.map((item) => (
+                <li key={item.page}>
+                  <button
+                    onClick={() => { setCurrentPage(item.page); onClose(); }}
+                    className="w-full text-left px-4 py-2 rounded-md text-sm font-medium hover:bg-gray-700 transition duration-300 ease-in-out"
+                  >
+                    {item.name}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </nav>
+
+          {/* User Info and Logout at bottom */}
+          <div className="mt-auto pt-4 border-t border-gray-700">
+            <p className="text-gray-400 text-sm mb-2">Logged in as:</p>
+            <span className="block text-white text-md font-semibold mb-3">{userName}</span>
+            <button
+              onClick={() => { handleLogout(); onClose(); }}
+              className="w-full bg-purple-600 text-white py-2 px-4 rounded-md text-sm font-medium hover:bg-purple-700 transition duration-300 ease-in-out transform hover:scale-105"
+            >
+              Logout
+            </button>
+          </div>
         </div>
       </div>
+    </>
+  );
+};
+
+
+/**
+ * Navbar Component
+ */
+const Navbar = ({ toggleSidebar, user }: { toggleSidebar: () => void; user: User | null }) => {
+  return (
+    <nav className="bg-gray-800 p-4 shadow-lg flex justify-between items-center relative z-30"> {/* Increased z-index */}
+      <div className="flex items-center space-x-3">
+        <button onClick={toggleSidebar} className="text-white focus:outline-none focus:ring-2 focus:ring-gray-600 rounded-md">
+          <svg className="h-7 w-7" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 6h16M4 12h16M4 18h16" />
+          </svg>
+        </button>
+        {/* Updated logo source to use a generic LOGO placeholder image for desktop */}
+        <img src="https://placehold.co/100x40/6b46c1/ffffff?text=LOGO" alt="Spendt Logo" className="h-8 w-auto hidden sm:block rounded-md" onError={(e) => {
+          const target = e.target as HTMLImageElement;
+          target.onerror = null; // Prevent infinite loop if fallback also fails
+          target.src = "https://placehold.co/40x40/6b46c1/ffffff?text=LOGO"; // Fallback placeholder
+        }} />
+      </div>
+      {/* Updated logo source to use a generic LOGO placeholder image for mobile */}
+      <img src="https://placehold.co/100x40/6b46c1/ffffff?text=LOGO" alt="Spendt Logo" className="h-8 w-auto sm:hidden rounded-md" onError={(e) => {
+          const target = e.target as HTMLImageElement;
+          target.onerror = null; // Prevent infinite loop if fallback also fails
+          target.src = "https://placehold.co/40x40/6b46c1/ffffff?text=LOGO"; // Fallback placeholder
+      }}/>
     </nav>
   );
 };
 
 /**
  * PageLayout Component
- * A common layout for all content pages.
  */
 const PageLayout = ({ title, children }: { title: string; children: React.ReactNode }) => (
   <div className="container mx-auto p-6 bg-white rounded-lg shadow-md my-6 border-b-2 border-purple-500">
@@ -405,12 +515,10 @@ const PageLayout = ({ title, children }: { title: string; children: React.ReactN
 const Dashboard = () => {
   const { user, totalBankBalance, totalIncome, totalExpenses, salaryDetails, upcomingIncome, monthlyNetCashFlow } = useAuth();
 
-  // Prepare data for the forecast chart
   const forecastData = [];
   let currentProjectedBalance = totalBankBalance;
   forecastData.push({ name: 'Current', Balance: parseFloat(totalBankBalance.toFixed(2)) });
 
-  // Project for the next 6 months
   for (let i = 1; i <= 6; i++) {
     currentProjectedBalance += monthlyNetCashFlow;
     forecastData.push({
@@ -466,7 +574,7 @@ const Dashboard = () => {
         <h3 className="text-2xl font-extrabold text-gray-800 mb-4">Financial Forecast (Next 6 Months)</h3>
         <p className="text-gray-700 mb-6">This chart projects your current balance based on your average monthly net cash flow (salary + recent incomes - recent expenses).</p>
         <div style={{ width: '100%', height: 400 }}>
-          <ResponsiveContainer>
+          <ResponsiveContainer width="100%" height="100%">
             <LineChart
               data={forecastData}
               margin={{
@@ -495,16 +603,16 @@ const Dashboard = () => {
  */
 const Banks = () => {
   const { user, db, appId, setIsLoading: setGlobalIsLoading } = useAuth();
-  const [showForm, setShowForm] = useState(false); // Controls visibility of add/edit form
-  const [isEditing, setIsEditing] = useState(false); // True if editing, false if adding
-  const [currentEditAccount, setCurrentEditAccount] = useState<BankAccount | null>(null); // Holds account data being edited
+  const [showForm, setShowForm] = useState(false);
+  const [isEditing, setIsEditing] = useState(false);
+  const [currentEditAccount, setCurrentEditAccount] = useState<BankAccount | null>(null);
 
   const [bankName, setBankName] = useState('');
   const [fullName, setFullName] = useState('');
   const [cardNumber, setCardNumber] = useState('');
   const [expirationDate, setExpirationDate] = useState('');
   const [amount, setAmount] = useState('');
-  const [bankAccounts, setBankAccounts] = useState<BankAccount[]>([]); // Explicitly type bankAccounts
+  const [bankAccounts, setBankAccounts] = useState<BankAccount[]>([]);
   const [message, setMessage] = useState('');
   const [messageType, setMessageType] = useState<'success' | 'error' | 'info'>('info');
 
@@ -512,7 +620,6 @@ const Banks = () => {
     setMessage('');
   };
 
-  // Helper to reset form fields
   const resetForm = () => {
     setBankName('');
     setFullName('');
@@ -523,10 +630,9 @@ const Banks = () => {
     setIsEditing(false);
   };
 
-  // Fetch bank accounts from Firestore in real-time
   useEffect(() => {
-    if (!user) {
-      setBankAccounts([]); // Clear accounts if user logs out
+    if (!user || !db) {
+      setBankAccounts([]);
       return;
     }
 
@@ -534,19 +640,18 @@ const Banks = () => {
     const q = query(banksCollectionRef);
 
     const unsubscribe = onSnapshot(q, (snapshot) => {
-      // Ensure 'id' from doc.data() doesn't conflict with doc.id
       const accounts: BankAccount[] = snapshot.docs.map(doc => {
-        const data = doc.data() as Omit<BankAccount, 'id'>; // Cast data without 'id'
+        const data = doc.data() as Omit<BankAccount, 'id'>;
         return {
           id: doc.id,
-          ...data, // Spread data, doc.id is guaranteed
+          ...data,
           createdAt: data.createdAt instanceof Timestamp ? data.createdAt.toDate() : (data.createdAt as Date) || undefined,
           lastUpdated: data.lastUpdated instanceof Timestamp ? data.lastUpdated.toDate() : (data.lastUpdated as Date) || undefined,
         };
       });
       accounts.sort((a, b) => {
-        const dateA = a.createdAt?.getTime() || 0;
-        const dateB = b.createdAt?.getTime() || 0;
+        const dateA = (a.createdAt instanceof Timestamp ? a.createdAt.toDate() : a.createdAt)?.getTime() || 0;
+        const dateB = (b.createdAt instanceof Timestamp ? b.createdAt.toDate() : b.createdAt)?.getTime() || 0;
         return dateB - dateA;
       });
       setBankAccounts(accounts);
@@ -565,21 +670,18 @@ const Banks = () => {
 
 
   const handleAddBankClick = () => {
-    resetForm(); // Clear fields for new entry
+    resetForm();
     setShowForm(true);
     setMessage('');
   };
 
-  const handleEditBankClick = (account: BankAccount) => { // Explicitly type account
+  const handleEditBankClick = (account: BankAccount) => {
     setCurrentEditAccount(account);
     setBankName(account.bankName);
     setFullName(account.fullName);
-    // When editing, if a card number was saved, we need to show its full value (even if only last 4 are saved)
-    // For simplicity, we'll populate the card number field with current last4Digits and expect full re-entry if needed.
-    // A more robust solution might require storing full card number encrypted.
-    setCardNumber(account.last4Digits === '0000' ? '' : account.last4Digits); // Show '0000' as empty for editing
+    setCardNumber(account.last4Digits === '0000' ? '' : account.last4Digits);
     setExpirationDate(account.expirationDate || '');
-    setAmount(account.amount.toString()); // Convert number back to string for input field
+    setAmount(account.amount.toString());
     setIsEditing(true);
     setShowForm(true);
     setMessage('');
@@ -587,7 +689,7 @@ const Banks = () => {
 
   const handleCloseForm = () => {
     setShowForm(false);
-    resetForm(); // Reset form fields and editing state
+    resetForm();
     setMessage('');
   };
 
@@ -603,12 +705,18 @@ const Banks = () => {
       return;
     }
 
-    setGlobalIsLoading(true); // Activate full-page spinner
+    setGlobalIsLoading(true);
     setMessage('');
 
     try {
+      if (!user || !db) {
+        setMessage('Firebase or user not initialized. Cannot save data.');
+        setMessageType('error');
+        setGlobalIsLoading(false);
+        return;
+      }
       const last4Digits = cardNumber.length >= 4 ? cardNumber.slice(-4) : '0000';
-      const bankData: Omit<BankAccount, 'id' | 'createdAt' | 'lastUpdated'> = { // Type for data being saved
+      const bankData: Omit<BankAccount, 'id' | 'createdAt' | 'lastUpdated'> = {
         bankName,
         fullName,
         last4Digits,
@@ -616,34 +724,28 @@ const Banks = () => {
         amount: parseFloat(amount),
       };
 
-      if (user) {
-        const banksCollectionRef = collection(db, `artifacts/${appId}/users/${user.uid}/banks`);
-        if (isEditing && currentEditAccount) {
-          // Update existing document
-          await setDoc(doc(banksCollectionRef, currentEditAccount.id), {
-            ...bankData,
-            createdAt: currentEditAccount.createdAt instanceof Timestamp ? currentEditAccount.createdAt : (currentEditAccount.createdAt ? Timestamp.fromDate(currentEditAccount.createdAt as Date) : serverTimestamp()), // Preserve original createdAt, ensure Timestamp
-            lastUpdated: serverTimestamp(), // Add a last updated timestamp
-          });
-          setMessage('Bank account updated successfully!');
-        } else {
-          // Add new document
-          await setDoc(doc(banksCollectionRef), {
-            ...bankData,
-            createdAt: serverTimestamp(),
-            lastUpdated: serverTimestamp(),
-          });
-          setMessage('Bank account added successfully!');
-        }
-        setMessageType('success');
-        setShowForm(false); // Close form on success
-        resetForm(); // Clear form fields
-        setTimeout(() => setMessage(''), 3000);
+      const banksCollectionRef = collection(db, `artifacts/${appId}/users/${user.uid}/banks`);
+      if (isEditing && currentEditAccount) {
+        await setDoc(doc(banksCollectionRef, currentEditAccount.id), {
+          ...bankData,
+          createdAt: currentEditAccount.createdAt instanceof Timestamp ? currentEditAccount.createdAt : (currentEditAccount.createdAt ? Timestamp.fromDate(currentEditAccount.createdAt as Date) : serverTimestamp()),
+          lastUpdated: serverTimestamp(),
+        });
+        setMessage('Bank account updated successfully!');
       } else {
-        setMessage('User not authenticated. Please log in to save data.');
-        setMessageType('error');
+        await setDoc(doc(banksCollectionRef), {
+          ...bankData,
+          createdAt: serverTimestamp(),
+          lastUpdated: serverTimestamp(),
+        });
+        setMessage('Bank account added successfully!');
       }
-    } catch (error: unknown) { // Explicitly type error
+      setMessageType('success');
+      setShowForm(false);
+      resetForm();
+      setTimeout(() => setMessage(''), 3000);
+
+    } catch (error: unknown) {
       let errorMessage = 'Error saving bank account.';
       if (error instanceof Error) {
         errorMessage = `Error saving bank account: ${error.message}`;
@@ -652,7 +754,7 @@ const Banks = () => {
       setMessageType('error');
       console.error("Error saving bank account:", error);
     } finally {
-      setGlobalIsLoading(false); // Deactivate full-page spinner
+      setGlobalIsLoading(false);
     }
   };
 
@@ -662,13 +764,12 @@ const Banks = () => {
       <MessageBox message={message} type={messageType} onClose={closeMessageBox} />
       <p className="text-gray-700 mb-4">Manage your bank accounts and financial institutions here.</p>
 
-      {/* Disclaimer */}
       <div className="bg-orange-100 border-l-4 border-orange-500 text-orange-700 p-4 mb-6 rounded-md" role="alert">
         <p className="font-bold">Important Note on Security:</p>
         <p className="text-sm">For your safety and privacy, this application does **NOT** automatically fetch bank data from any financial institution. Please manually provide the bank's name, your full name, and the amount. Your financial data is stored securely within your personal account on this app, not directly linked to external banks.</p>
       </div>
 
-      {!showForm && ( // Only show "Add New" button if no form is active
+      {!showForm && (
         <button
           onClick={handleAddBankClick}
           className="bg-indigo-600 text-white py-2 px-4 rounded-md hover:bg-indigo-700 transition duration-300 ease-in-out transform hover:scale-105"
@@ -715,7 +816,7 @@ const Banks = () => {
                 className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-indigo-500 focus:border-indigo-500"
                 value={cardNumber}
                 onChange={(e) => {
-                  const val = e.target.value.replace(/\D/g, '').slice(0, 16); // Only digits, max 16
+                  const val = e.target.value.replace(/\D/g, '').slice(0, 16);
                   setCardNumber(val);
                 }}
                 placeholder="•••• •••• •••• ••••"
@@ -730,9 +831,9 @@ const Banks = () => {
                 className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-indigo-500 focus:border-indigo-500"
                 value={expirationDate}
                 onChange={(e) => {
-                  let val = e.target.value.replace(/\D/g, ''); // Remove non-digits
+                  let val = e.target.value.replace(/\D/g, '');
                   if (val.length > 2) {
-                    val = val.slice(0, 2) + '/' + val.slice(2, 4); // Format MM/YY
+                    val = val.slice(0, 2) + '/' + val.slice(2, 4);
                   }
                   setExpirationDate(val);
                 }}
@@ -779,7 +880,7 @@ const Banks = () => {
           </p>
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {bankAccounts.map((account: BankAccount) => ( // Explicitly type account here
+            {bankAccounts.map((account: BankAccount) => (
               <div key={account.id} className="bg-white p-4 rounded-lg shadow-md border-b-2 border-indigo-300">
                 <h4 className="font-bold text-lg text-indigo-700">{account.bankName}</h4>
                 <p className="text-gray-700 text-sm">Account Holder: <span className="font-medium">{account.fullName}</span></p>
@@ -791,7 +892,7 @@ const Banks = () => {
                   {account.amount.toLocaleString('en-US', { style: 'currency', currency: 'USD' })}
                 </p>
                  <p className="text-gray-500 text-xs mt-1">
-                  Added: {account.createdAt instanceof Timestamp ? account.createdAt.toDate().toLocaleDateString() : (account.createdAt as Date)?.toLocaleDateString() || 'N/A'}
+                  Added: {(account.createdAt instanceof Timestamp ? account.createdAt.toDate() : (account.createdAt as Date))?.toLocaleDateString() || 'N/A'}
                 </p>
                 <div className="mt-3 text-right">
                   <button
@@ -825,7 +926,7 @@ const Incomes = () => {
   const [incomeDate, setIncomeDate] = useState('');
 
   const [incomeEntries, setIncomeEntries] = useState<IncomeEntry[]>([]);
-  const [filterPeriod, setFilterPeriod] = useState('month'); // 'day', 'week', 'month', 'year'
+  const [filterPeriod, setFilterPeriod] = useState('month');
   const [filteredIncomes, setFilteredIncomes] = useState<IncomeEntry[]>([]);
   const [totalFilteredIncome, setTotalFilteredIncome] = useState(0);
 
@@ -845,9 +946,8 @@ const Incomes = () => {
     setIsEditing(false);
   };
 
-  // Fetch income entries from Firestore
   useEffect(() => {
-    if (!user) {
+    if (!user || !db) {
       setIncomeEntries([]);
       return;
     }
@@ -857,19 +957,17 @@ const Incomes = () => {
 
     const unsubscribe = onSnapshot(q, (snapshot) => {
       const entries: IncomeEntry[] = snapshot.docs.map(doc => {
-        const data = doc.data() as Omit<IncomeEntry, 'id'>; // Cast data without 'id'
+        const data = doc.data() as Omit<IncomeEntry, 'id'>;
         return {
           id: doc.id,
           ...data,
-          // Convert Firestore Timestamp to Date object for easier filtering
           incomeDate: data.incomeDate instanceof Timestamp ? data.incomeDate.toDate() : (data.incomeDate as Date),
           createdAt: data.createdAt instanceof Timestamp ? data.createdAt.toDate() : (data.createdAt as Date),
         };
       });
-      // Sort by creation date descending
       entries.sort((a, b) => {
-        const dateA = a.createdAt?.getTime() || 0;
-        const dateB = b.createdAt?.getTime() || 0;
+        const dateA = (a.createdAt instanceof Timestamp ? a.createdAt.toDate() : a.createdAt)?.getTime() || 0;
+        const dateB = (b.createdAt instanceof Timestamp ? b.createdAt.toDate() : b.createdAt)?.getTime() || 0;
         return dateB - dateA;
       });
       setIncomeEntries(entries);
@@ -886,7 +984,6 @@ const Incomes = () => {
     return () => unsubscribe();
   }, [user, db, appId]);
 
-  // Filter incomes and calculate total based on filterPeriod
   useEffect(() => {
     const now = new Date();
     let filtered: IncomeEntry[] = incomeEntries;
@@ -902,8 +999,8 @@ const Incomes = () => {
         );
       });
     } else if (filterPeriod === 'week') {
-      const startOfWeek = new Date(now.getFullYear(), now.getMonth(), now.getDate() - now.getDay()); // Sunday
-      const endOfWeek = new Date(now.getFullYear(), now.getMonth(), now.getDate() + (6 - now.getDay()) + 1); // Saturday + 1 day for full range
+      const startOfWeek = new Date(now.getFullYear(), now.getMonth(), now.getDate() - now.getDay());
+      const endOfWeek = new Date(now.getFullYear(), now.getMonth(), now.getDate() + (6 - now.getDay()) + 1);
       filtered = incomeEntries.filter(entry => {
         const entryDate = entry.incomeDate instanceof Timestamp ? entry.incomeDate.toDate() : (entry.incomeDate as Date);
         if (!entryDate) return false;
@@ -925,7 +1022,7 @@ const Incomes = () => {
         return entryDate.getFullYear() === now.getFullYear();
       });
     } else if (filterPeriod === 'all') {
-      filtered = incomeEntries; // Show all entries
+      filtered = incomeEntries;
     }
 
     setFilteredIncomes(filtered);
@@ -936,20 +1033,19 @@ const Incomes = () => {
 
   const handleAddIncomeClick = () => {
     resetForm();
-    // Set default date to today for new entries
     const today = new Date();
-    setIncomeDate(today.toISOString().split('T')[0]); //YYYY-MM-DD format for input type="date"
+    setIncomeDate(today.toISOString().split('T')[0]);
     setShowForm(true);
     setMessage('');
   };
 
-  const handleEditIncomeClick = (income: IncomeEntry) => { // Explicitly type income
+  const handleEditIncomeClick = (income: IncomeEntry) => {
     setCurrentEditIncome(income);
     setBusinessName(income.businessName);
     setIndustry(income.industry);
     setIncomeAmount(income.incomeAmount.toString());
     const dateValue = income.incomeDate instanceof Timestamp ? income.incomeDate.toDate() : (income.incomeDate as Date | null);
-    setIncomeDate(dateValue ? dateValue.toISOString().split('T')[0] : ''); // Format for date input
+    setIncomeDate(dateValue ? dateValue.toISOString().split('T')[0] : '');
     setIsEditing(true);
     setShowForm(true);
     setMessage('');
@@ -977,40 +1073,40 @@ const Incomes = () => {
     setMessage('');
 
     try {
+      if (!user || !db) {
+        setMessage('Firebase or user not initialized. Cannot save data.');
+        setMessageType('error');
+        setGlobalIsLoading(false);
+        return;
+      }
       const incomeData: Omit<IncomeEntry, 'id' | 'createdAt' | 'lastUpdated'> = {
         businessName,
         industry,
         incomeAmount: parseFloat(incomeAmount),
-        // Convert date string to Firestore Timestamp
         incomeDate: new Date(incomeDate),
       };
 
-      if (user) {
-        const incomesCollectionRef = collection(db, `artifacts/${appId}/users/${user.uid}/incomes`);
-        if (isEditing && currentEditIncome) {
-          await setDoc(doc(incomesCollectionRef, currentEditIncome.id), {
-            ...incomeData,
-            createdAt: currentEditIncome.createdAt instanceof Timestamp ? currentEditIncome.createdAt : (currentEditIncome.createdAt ? Timestamp.fromDate(currentEditIncome.createdAt as Date) : serverTimestamp()), // Preserve or set createdAt
-            lastUpdated: serverTimestamp(),
-          });
-          setMessage('Income entry updated successfully!');
-        } else {
-          await setDoc(doc(incomesCollectionRef), {
-            ...incomeData,
-            createdAt: serverTimestamp(),
-            lastUpdated: serverTimestamp(),
-          });
-          setMessage('Income entry added successfully!');
-        }
-        setMessageType('success');
-        setShowForm(false);
-        resetForm();
-        setTimeout(() => setMessage(''), 3000);
+      const incomesCollectionRef = collection(db, `artifacts/${appId}/users/${user.uid}/incomes`);
+      if (isEditing && currentEditIncome) {
+        await setDoc(doc(incomesCollectionRef, currentEditIncome.id), {
+          ...incomeData,
+          createdAt: currentEditIncome.createdAt instanceof Timestamp ? currentEditIncome.createdAt : (currentEditIncome.createdAt ? Timestamp.fromDate(currentEditIncome.createdAt as Date) : serverTimestamp()),
+          lastUpdated: serverTimestamp(),
+        });
+        setMessage('Income entry updated successfully!');
       } else {
-        setMessage('User not authenticated. Please log in to save data.');
-        setMessageType('error');
+        await setDoc(doc(incomesCollectionRef), {
+          ...incomeData,
+          createdAt: serverTimestamp(),
+          lastUpdated: serverTimestamp(),
+        });
+        setMessage('Income entry added successfully!');
       }
-    } catch (error: unknown) { // Explicitly type error
+      setMessageType('success');
+      setShowForm(false);
+      resetForm();
+      setTimeout(() => setMessage(''), 3000);
+    } catch (error: unknown) {
       let errorMessage = 'Error saving income entry.';
       if (error instanceof Error) {
         errorMessage = `Error saving income entry: ${error.message}`;
@@ -1118,16 +1214,16 @@ const Incomes = () => {
             </p>
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {filteredIncomes.map((entry: IncomeEntry) => ( // Explicitly type entry
+              {filteredIncomes.map((entry: IncomeEntry) => (
                 <div key={entry.id} className="bg-white p-4 rounded-lg shadow-md border-b-2 border-teal-300">
                   <h4 className="font-bold text-lg text-teal-700">{entry.businessName}</h4>
                   <p className="text-gray-700 text-sm">Industry: <span className="font-medium">{entry.industry}</span></p>
-                  <p className="text-gray-700 text-sm">Date: <span className="font-mono">{entry.incomeDate instanceof Timestamp ? entry.incomeDate.toDate().toLocaleDateString() : (entry.incomeDate as Date)?.toLocaleDateString() || 'N/A'}</span></p>
+                  <p className="text-gray-700 text-sm">Date: <span className="font-mono">{(entry.incomeDate instanceof Timestamp ? entry.incomeDate.toDate() : (entry.incomeDate as Date))?.toLocaleDateString() || 'N/A'}</span></p>
                   <p className="text-gray-800 text-xl font-bold mt-2">
                     {entry.incomeAmount.toLocaleString('en-US', { style: 'currency', currency: 'USD' })}
                   </p>
                   <p className="text-gray-500 text-xs mt-1">
-                    Added: {entry.createdAt instanceof Timestamp ? entry.createdAt.toDate().toLocaleDateString() : (entry.createdAt as Date)?.toLocaleDateString() || 'N/A'}
+                    Added: {(entry.createdAt instanceof Timestamp ? entry.createdAt.toDate() : (entry.createdAt as Date))?.toLocaleDateString() || 'N/A'}
                   </p>
                   <div className="mt-3 flex justify-end space-x-2">
                     <button
@@ -1148,7 +1244,6 @@ const Incomes = () => {
           )}
         </div>
 
-        {/* Income Summary Card */}
         <div className="lg:col-span-1 bg-green-50 p-6 rounded-lg shadow-md border border-green-200 h-fit sticky top-24">
           <h3 className="text-xl font-semibold text-green-800 mb-4">Total Income Summary</h3>
           <div className="flex flex-wrap gap-2 mb-4">
@@ -1207,7 +1302,7 @@ const Expenses = () => {
   const [expenseDate, setExpenseDate] = useState('');
 
   const [expenseEntries, setExpenseEntries] = useState<ExpenseEntry[]>([]);
-  const [filterPeriod, setFilterPeriod] = useState('month'); // 'day', 'week', 'month', 'year', 'all'
+  const [filterPeriod, setFilterPeriod] = useState('month');
   const [filteredExpenses, setFilteredExpenses] = useState<ExpenseEntry[]>([]);
   const [totalFilteredExpense, setTotalFilteredExpense] = useState(0);
 
@@ -1232,9 +1327,8 @@ const Expenses = () => {
     setIsEditing(false);
   };
 
-  // Fetch expense entries from Firestore
   useEffect(() => {
-    if (!user) {
+    if (!user || !db) {
       setExpenseEntries([]);
       return;
     }
@@ -1244,23 +1338,21 @@ const Expenses = () => {
 
     const unsubscribe = onSnapshot(q, (snapshot) => {
       const entries: ExpenseEntry[] = snapshot.docs.map(doc => {
-        const data = doc.data() as Omit<ExpenseEntry, 'id'>; // Cast data without 'id'
+        const data = doc.data() as Omit<ExpenseEntry, 'id'>;
         return {
           id: doc.id,
           ...data,
-          // Convert Firestore Timestamp to Date object for easier filtering
           expenseDate: data.expenseDate instanceof Timestamp ? data.expenseDate.toDate() : (data.expenseDate as Date),
           createdAt: data.createdAt instanceof Timestamp ? data.createdAt.toDate() : (data.createdAt as Date),
         };
       });
-      // Sort by creation date descending
       entries.sort((a, b) => {
-        const dateA = a.createdAt?.getTime() || 0;
-        const dateB = b.createdAt?.getTime() || 0;
+        const dateA = (a.createdAt instanceof Timestamp ? a.createdAt.toDate() : a.createdAt)?.getTime() || 0;
+        const dateB = (b.createdAt instanceof Timestamp ? b.createdAt.toDate() : b.createdAt)?.getTime() || 0;
         return dateB - dateA;
       });
       setExpenseEntries(entries);
-    }, (error: unknown) => { // Explicitly type error
+    }, (error: unknown) => {
       let errorMessage = 'Error fetching expense entries.';
       if (error instanceof Error) {
         errorMessage = `Error fetching expense entries: ${error.message}`;
@@ -1273,7 +1365,6 @@ const Expenses = () => {
     return () => unsubscribe();
   }, [user, db, appId]);
 
-  // Filter expenses and calculate total based on filterPeriod
   useEffect(() => {
     const now = new Date();
     let filtered: ExpenseEntry[] = expenseEntries;
@@ -1289,8 +1380,8 @@ const Expenses = () => {
         );
       });
     } else if (filterPeriod === 'week') {
-      const startOfWeek = new Date(now.getFullYear(), now.getMonth(), now.getDate() - now.getDay()); // Sunday
-      const endOfWeek = new Date(now.getFullYear(), now.getMonth(), now.getDate() + (6 - now.getDay()) + 1); // Saturday + 1 day for full range
+      const startOfWeek = new Date(now.getFullYear(), now.getMonth(), now.getDate() - now.getDay());
+      const endOfWeek = new Date(now.getFullYear(), now.getMonth(), now.getDate() + (6 - now.getDay()) + 1);
       filtered = expenseEntries.filter(entry => {
         const entryDate = entry.expenseDate instanceof Timestamp ? entry.expenseDate.toDate() : (entry.expenseDate as Date);
         if (!entryDate) return false;
@@ -1312,7 +1403,7 @@ const Expenses = () => {
         return entryDate.getFullYear() === now.getFullYear();
       });
     } else if (filterPeriod === 'all') {
-      filtered = expenseEntries; // Show all entries
+      filtered = expenseEntries;
     }
 
     setFilteredExpenses(filtered);
@@ -1324,18 +1415,18 @@ const Expenses = () => {
   const handleAddExpenseClick = () => {
     resetForm();
     const today = new Date();
-    setExpenseDate(today.toISOString().split('T')[0]); //YYYY-MM-DD format for input type="date"
+    setExpenseDate(today.toISOString().split('T')[0]);
     setShowForm(true);
     setMessage('');
   };
 
-  const handleEditExpenseClick = (expense: ExpenseEntry) => { // Explicitly type expense
+  const handleEditExpenseClick = (expense: ExpenseEntry) => {
     setCurrentEditExpense(expense);
     setExpenseName(expense.name);
     setExpenseCategory(expense.category);
     setExpenseAmount(expense.expenseAmount.toString());
     const dateValue = expense.expenseDate instanceof Timestamp ? expense.expenseDate.toDate() : (expense.expenseDate as Date | null);
-    setExpenseDate(dateValue ? dateValue.toISOString().split('T')[0] : ''); // Format for date input
+    setExpenseDate(dateValue ? dateValue.toISOString().split('T')[0] : '');
     setIsEditing(true);
     setShowForm(true);
     setMessage('');
@@ -1363,44 +1454,44 @@ const Expenses = () => {
     setMessage('');
 
     try {
-      const expenseData: Omit<ExpenseEntry, 'id' | 'createdAt' | 'lastUpdated'> = { // Type for data being saved
+      if (!user || !db) {
+        setMessage('Firebase or user not initialized. Cannot save data.');
+        setMessageType('error');
+        setGlobalIsLoading(false);
+        return;
+      }
+      const expenseData: Omit<ExpenseEntry, 'id' | 'createdAt' | 'lastUpdated'> = {
         name: expenseName,
         category: expenseCategory,
         expenseAmount: parseFloat(expenseAmount),
-        expenseDate: new Date(expenseDate), // Convert date string to Firestore Timestamp
+        expenseDate: new Date(expenseDate),
       };
 
-      if (user) {
-        const expensesCollectionRef = collection(db, `artifacts/${appId}/users/${user.uid}/expenses`);
-        if (isEditing && currentEditExpense) {
-          // Use currentEditExpense.createdAt if it exists and is a Timestamp, otherwise get from Date or set serverTimestamp
-          const originalCreatedAt = currentEditExpense.createdAt instanceof Timestamp
-            ? currentEditExpense.createdAt
-            : (currentEditExpense.createdAt ? Timestamp.fromDate(currentEditExpense.createdAt as Date) : serverTimestamp());
+      const expensesCollectionRef = collection(db, `artifacts/${appId}/users/${user.uid}/expenses`);
+      if (isEditing && currentEditExpense) {
+        const originalCreatedAt = currentEditExpense.createdAt instanceof Timestamp
+          ? currentEditExpense.createdAt
+          : (currentEditExpense.createdAt ? Timestamp.fromDate(currentEditExpense.createdAt as Date) : serverTimestamp());
 
-          await setDoc(doc(expensesCollectionRef, currentEditExpense.id), {
-            ...expenseData,
-            createdAt: originalCreatedAt,
-            lastUpdated: serverTimestamp(),
-          });
-          setMessage('Expense entry updated successfully!');
-        } else {
-          await setDoc(doc(expensesCollectionRef), {
-            ...expenseData,
-            createdAt: serverTimestamp(),
-            lastUpdated: serverTimestamp(),
-          });
-          setMessage('Expense entry added successfully!');
-        }
-        setMessageType('success');
-        setShowForm(false);
-        resetForm();
-        setTimeout(() => setMessage(''), 3000);
+        await setDoc(doc(expensesCollectionRef, currentEditExpense.id), {
+          ...expenseData,
+          createdAt: originalCreatedAt,
+          lastUpdated: serverTimestamp(),
+        });
+        setMessage('Expense entry updated successfully!');
       } else {
-        setMessage('User not authenticated. Please log in to save data.');
-        setMessageType('error');
+        await setDoc(doc(expensesCollectionRef), {
+          ...expenseData,
+          createdAt: serverTimestamp(),
+          lastUpdated: serverTimestamp(),
+        });
+        setMessage('Expense entry added successfully!');
       }
-    } catch (error: unknown) { // Explicitly type error
+      setMessageType('success');
+      setShowForm(false);
+      resetForm();
+      setTimeout(() => setMessage(''), 3000);
+    } catch (error: unknown) {
       let errorMessage = 'Error saving expense entry.';
       if (error instanceof Error) {
         errorMessage = `Error saving expense entry: ${error.message}`;
@@ -1413,25 +1504,29 @@ const Expenses = () => {
     }
   };
 
-  const handleDeleteExpense = async (expenseId: string) => { // Explicitly type expenseId
+  const handleDeleteExpense = async (expenseId: string) => {
     if (!user || !expenseId) {
       setMessage('User not authenticated or invalid expense ID.');
       setMessageType('error');
       return;
     }
 
-    // Using a custom modal message instead of window.confirm
-    // It's recommended to replace window.confirm with a custom modal for better UX and consistency.
-    if (window.confirm("Are you sure you want to delete this expense entry?")) { // Using temporary confirm, should be replaced by custom modal
+    if (window.confirm("Are you sure you want to delete this expense entry?")) {
       setGlobalIsLoading(true);
       setMessage('');
       try {
+        if (!db) {
+          setMessage('Firebase not initialized. Cannot delete data.');
+          setMessageType('error');
+          setGlobalIsLoading(false);
+          return;
+        }
         const expenseDocRef = doc(db, `artifacts/${appId}/users/${user.uid}/expenses/${expenseId}`);
         await deleteDoc(expenseDocRef);
         setMessage('Expense entry deleted successfully!');
         setMessageType('success');
         setTimeout(() => setMessage(''), 3000);
-      } catch (error: unknown) { // Explicitly type error
+      } catch (error: unknown) {
         let errorMessage = 'Error deleting expense entry.';
         if (error instanceof Error) {
           errorMessage = `Error deleting expense entry: ${error.message}`;
@@ -1543,16 +1638,16 @@ const Expenses = () => {
             </p>
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {filteredExpenses.map((entry: ExpenseEntry) => ( // Explicitly type entry
+              {filteredExpenses.map((entry: ExpenseEntry) => (
                 <div key={entry.id} className="bg-white p-4 rounded-lg shadow-md border-b-2 border-red-300">
                   <h4 className="font-bold text-lg text-red-700">{entry.name}</h4>
                   <p className="text-gray-700 text-sm">Category: <span className="font-medium">{entry.category}</span></p>
-                  <p className="text-gray-700 text-sm">Date: <span className="font-mono">{entry.expenseDate instanceof Timestamp ? entry.expenseDate.toDate().toLocaleDateString() : (entry.expenseDate as Date)?.toLocaleDateString() || 'N/A'}</span></p>
+                  <p className="text-gray-700 text-sm">Date: <span className="font-mono">{(entry.expenseDate instanceof Timestamp ? entry.expenseDate.toDate() : (entry.expenseDate as Date))?.toLocaleDateString() || 'N/A'}</span></p>
                   <p className="text-gray-800 text-xl font-bold mt-2">
                     {entry.expenseAmount.toLocaleString('en-US', { style: 'currency', currency: 'USD' })}
                   </p>
                   <p className="text-gray-500 text-xs mt-1">
-                    Added: {entry.createdAt instanceof Timestamp ? entry.createdAt.toDate().toLocaleDateString() : (entry.createdAt as Date)?.toLocaleDateString() || 'N/A'}
+                    Added: {(entry.createdAt instanceof Timestamp ? entry.createdAt.toDate() : (entry.createdAt as Date))?.toLocaleDateString() || 'N/A'}
                   </p>
                   <div className="mt-3 flex justify-end space-x-2">
                     <button
@@ -1579,7 +1674,6 @@ const Expenses = () => {
           )}
         </div>
 
-        {/* Expense Summary Card */}
         <div className="lg:col-span-1 bg-red-50 p-6 rounded-lg shadow-md border border-red-200 h-fit sticky top-24">
           <h3 className="text-xl font-semibold text-red-800 mb-4">Total Expenses Summary</h3>
           <div className="flex flex-wrap gap-2 mb-4">
@@ -1627,13 +1721,12 @@ const Expenses = () => {
  * Salary Page Component
  */
 const Salary = () => {
-  // Use the global setIsLoading from AuthContext
   const { user, db, appId, setIsLoading: setGlobalIsLoading } = useAuth();
 
-  const [salary, setSalary] = useState<string | number>(''); // Allow string or number
+  const [salary, setSalary] = useState<string | number>('');
   const [frequency, setFrequency] = useState<'Weekly' | 'Fortnightly' | 'Monthly'>('Monthly');
-  const [paydaySpecific, setPaydaySpecific] = useState<string | number>(''); // Stores day of month or day of week
-  const [dayOffInMonth, setDayOffInMonth] = useState<'1' | '2'>('2'); // Default to 2 days off per week
+  const [paydaySpecific, setPaydaySpecific] = useState<string | number>('');
+  const [dayOffInMonth, setDayOffInMonth] = useState<'1' | '2'>('2');
   const [sss, setSss] = useState<string | number>('');
   const [philhealth, setPhilhealth] = useState<string | number>('');
   const [pagibig, setPagibig] = useState<string | number>('');
@@ -1647,17 +1740,26 @@ const Salary = () => {
   const [message, setMessage] = useState('');
   const [messageType, setMessageType] = useState<'success' | 'error' | 'info'>('info');
 
-  const salaryDocRef = user ? doc(db, `artifacts/${appId}/users/${user.uid}/salary/details`) : null;
+  // New state to track if user is actively typing/editing
+  const [isActivelyEditing, setIsActivelyEditing] = useState(false);
+  // Ref to hold the current salary data from Firestore, to compare for updates
+  const latestSalaryDataRef = useRef<SalaryDetails | null>(null);
 
-  // Load salary data from Firestore on component mount
+
+  const salaryDocRef = (user && db) ? doc(db, `artifacts/${appId}/users/${user.uid}/salary/details`) : null;
+
+  // Use onSnapshot for real-time updates but conditionally apply them to state
   useEffect(() => {
-    const fetchSalaryData = async () => {
-      if (!user || !salaryDocRef) return;
-      try {
-        setGlobalIsLoading(true); // Start loading for data fetch
-        const docSnap = await getDoc(salaryDocRef);
-        if (docSnap.exists()) {
-          const data = docSnap.data() as SalaryDetails; // Type assertion
+    if (!user || !db || !salaryDocRef) return;
+
+    const unsubscribe = onSnapshot(salaryDocRef, (docSnap) => {
+      if (docSnap.exists()) {
+        const data = docSnap.data() as SalaryDetails;
+        latestSalaryDataRef.current = data; // Keep track of the latest data from Firestore
+
+        // Only update form fields if the user is NOT actively editing
+        // or if the data from Firestore is genuinely different
+        if (!isActivelyEditing) {
           setSalary(data.salary || '');
           setFrequency(data.frequency || 'Monthly');
           setPaydaySpecific(data.paydaySpecific || '');
@@ -1679,25 +1781,53 @@ const Salary = () => {
             data.loans,
             data.voluntary
           );
+        } else {
+          // If actively editing, still update calculation, but not form fields
+          calculateSalary(
+            salary, frequency, dayOffInMonth, // Use current input values for calculation
+            sss, philhealth, pagibig, tax, loans, voluntary
+          );
         }
-      } catch (error: unknown) { // Explicitly type error
-        let errorMessage = 'Error loading salary data.';
-        if (error instanceof Error) {
-          errorMessage = `Error loading salary data: ${error.message}`;
+      } else {
+        latestSalaryDataRef.current = null;
+        if (!isActivelyEditing) { // Clear fields only if not editing and doc doesn't exist
+          setSalary('');
+          setFrequency('Monthly');
+          setPaydaySpecific('');
+          setDayOffInMonth('2');
+          setSss('');
+          setPhilhealth('');
+          setPagibig('');
+          setTax('');
+          setLoans('');
+          setVoluntary('');
+          setMonthlyIncome(0);
+          setDailyIncome(0);
+          setTotalDeductions(0);
         }
-        setMessage(errorMessage);
-        setMessageType('error');
-        console.error('Error loading salary data:', error);
-      } finally {
-        setGlobalIsLoading(false); // End loading
       }
-    };
+    }, (error: unknown) => {
+      let errorMessage = 'Error fetching salary data.';
+      if (error instanceof Error) {
+        errorMessage = `Error fetching salary data: ${error.message}`;
+      }
+      setMessage(errorMessage);
+      setMessageType('error');
+      console.error('Error fetching salary data:', error);
+    });
 
-    fetchSalaryData();
-  }, [user, salaryDocRef, setGlobalIsLoading]); // Added setGlobalIsLoading as dependency
+    return () => unsubscribe();
+  }, [user, db, appId, isActivelyEditing, salaryDocRef]); // Added isActivelyEditing to dependencies
+
+
+  // Helper function to handle input changes and set isActivelyEditing
+  const handleInputChange = (setter: React.Dispatch<React.SetStateAction<string | number>>) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
+    setter(e.target.value);
+    setIsActivelyEditing(true); // User is now actively modifying inputs
+  };
 
   const calculateSalary = (
-    currentSalary: string | number, // Explicitly type parameters
+    currentSalary: string | number,
     currentFrequency: 'Weekly' | 'Fortnightly' | 'Monthly',
     currentDayOffInMonth: '1' | '2',
     currentSss: string | number,
@@ -1718,10 +1848,10 @@ const Salary = () => {
     let calculatedMonthlyIncome = 0;
     switch (currentFrequency) {
       case 'Weekly':
-        calculatedMonthlyIncome = parsedSalary * (365 / 7 / 12); // Convert weekly to monthly average
+        calculatedMonthlyIncome = parsedSalary * (365 / 7 / 12);
         break;
       case 'Fortnightly':
-        calculatedMonthlyIncome = parsedSalary * (365 / 14 / 12); // Convert fortnightly to monthly average
+        calculatedMonthlyIncome = parsedSalary * (365 / 14 / 12);
         break;
       case 'Monthly':
       default:
@@ -1730,11 +1860,11 @@ const Salary = () => {
     }
     setMonthlyIncome(calculatedMonthlyIncome);
 
-    let workdaysInMonth = 22; // Default for 5-day work week
+    let workdaysInMonth = 22;
     if (currentDayOffInMonth === '1') {
-      workdaysInMonth = 26; // Approx. 6 days a week (30 total days - 4 days off)
+      workdaysInMonth = 26;
     } else if (currentDayOffInMonth === '2') {
-      workdaysInMonth = 22; // Approx. 5 days a week (30 total days - 8 days off)
+      workdaysInMonth = 22;
     }
 
     const calculatedDailyIncome = workdaysInMonth > 0 ? (calculatedMonthlyIncome / workdaysInMonth) : 0;
@@ -1746,46 +1876,48 @@ const Salary = () => {
   };
 
   const handleCalculateAndSave = async () => {
-    setGlobalIsLoading(true); // Activate full-page spinner
-    setMessage(''); // Clear any previous messages
+    setGlobalIsLoading(true);
+    setMessage('');
 
     try {
-      // Perform calculation first with current state values
+      if (!user || !salaryDocRef) {
+        setMessage('Firebase or user not initialized. Cannot save data.');
+        setMessageType('error');
+        setGlobalIsLoading(false);
+        return;
+      }
+
+      // Ensure calculations are based on current form state before saving
       calculateSalary(
         salary, frequency, dayOffInMonth,
         sss, philhealth, pagibig, tax, loans, voluntary
       );
 
-      // Save data to Firestore
-      if (user && salaryDocRef) {
-        const salaryData: Omit<SalaryDetails, 'lastUpdated'> = { // Type for data being saved
-          salary: parseFloat(String(salary)) || 0,
-          frequency,
-          paydaySpecific: String(paydaySpecific), // Ensure string for saving
-          dayOffInMonth,
-          sss: parseFloat(String(sss)) || 0,
-          philhealth: parseFloat(String(philhealth)) || 0,
-          pagibig: parseFloat(String(pagibig)) || 0,
-          tax: parseFloat(String(tax)) || 0,
-          loans: parseFloat(String(loans)) || 0,
-          voluntary: parseFloat(String(voluntary)) || 0,
-        };
+      const salaryData: Omit<SalaryDetails, 'lastUpdated'> = {
+        salary: parseFloat(String(salary)) || 0,
+        frequency,
+        paydaySpecific: String(paydaySpecific),
+        dayOffInMonth,
+        sss: parseFloat(String(sss)) || 0,
+        philhealth: parseFloat(String(philhealth)) || 0,
+        pagibig: parseFloat(String(pagibig)) || 0,
+        tax: parseFloat(String(tax)) || 0,
+        loans: parseFloat(String(loans)) || 0,
+        voluntary: parseFloat(String(voluntary)) || 0,
+      };
 
-        await setDoc(salaryDocRef, {
-          ...salaryData,
-          lastUpdated: serverTimestamp(),
-        });
-        setMessage('Salary data saved successfully!');
-        setMessageType('success');
-        // Automatically clear the message after 3 seconds
-        setTimeout(() => {
-          setMessage('');
-        }, 3000);
-      } else {
-        setMessage('User not authenticated. Please log in to save data.');
-        setMessageType('error');
-      }
-    } catch (error: unknown) { // Explicitly type error
+      await setDoc(salaryDocRef, {
+        ...salaryData,
+        lastUpdated: serverTimestamp(),
+      });
+      setMessage('Salary data saved successfully!');
+      setMessageType('success');
+      setIsActivelyEditing(false); // Reset editing state after successful save
+      setTimeout(() => {
+        setMessage('');
+      }, 3000);
+
+    } catch (error: unknown) {
       let errorMessage = 'Error saving salary data.';
       if (error instanceof Error) {
         errorMessage = `Error saving salary data: ${error.message}`;
@@ -1794,7 +1926,7 @@ const Salary = () => {
       setMessageType('error');
       console.error('Error saving salary data:', error);
     } finally {
-      setGlobalIsLoading(false); // Deactivate full-page spinner
+      setGlobalIsLoading(false);
     }
   };
 
@@ -1802,7 +1934,6 @@ const Salary = () => {
     setMessage('');
   };
 
-  // Render Payday input based on Frequency
   const renderPaydayInput = () => {
     if (frequency === 'Monthly') {
       return (
@@ -1810,7 +1941,7 @@ const Salary = () => {
           id="paydaySpecific"
           className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-purple-500 focus:border-purple-500"
           value={paydaySpecific}
-          onChange={(e) => setPaydaySpecific(e.target.value)}
+          onChange={handleInputChange(setPaydaySpecific)}
         >
           <option value="">Select Day</option>
           {Array.from({ length: 31 }, (_, i) => i + 1).map((day) => (
@@ -1826,7 +1957,7 @@ const Salary = () => {
           id="paydaySpecific"
           className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-purple-500 focus:border-purple-500"
           value={paydaySpecific}
-          onChange={(e) => setPaydaySpecific(e.target.value)}
+          onChange={handleInputChange(setPaydaySpecific)}
         >
           <option value="">Select Day</option>
           <option value="Monday">Monday</option>
@@ -1843,7 +1974,7 @@ const Salary = () => {
           id="paydaySpecific"
           className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-purple-500 focus:border-purple-500"
           value={paydaySpecific}
-          onChange={(e) => setPaydaySpecific(e.target.value)}
+          onChange={handleInputChange(setPaydaySpecific)}
         />
       );
     }
@@ -1865,7 +1996,7 @@ const Salary = () => {
               id="salary"
               className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-purple-500 focus:border-purple-500"
               value={salary}
-              onChange={(e) => setSalary(e.target.value)}
+              onChange={handleInputChange(setSalary)}
               placeholder="e.g., 50000"
             />
           </div>
@@ -1877,9 +2008,10 @@ const Salary = () => {
               id="frequency"
               className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-purple-500 focus:border-purple-500"
               value={frequency}
-              onChange={(e: React.ChangeEvent<HTMLSelectElement>) => { // Explicitly type event
+              onChange={(e: React.ChangeEvent<HTMLSelectElement>) => {
                 setFrequency(e.target.value as 'Weekly' | 'Fortnightly' | 'Monthly');
                 setPaydaySpecific(''); // Reset payday specific when frequency changes
+                setIsActivelyEditing(true); // User is now actively modifying inputs
               }}
             >
               <option value="Weekly">Weekly</option>
@@ -1901,7 +2033,7 @@ const Salary = () => {
               id="dayOffInMonth"
               className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-purple-500 focus:border-purple-500"
               value={dayOffInMonth}
-              onChange={(e: React.ChangeEvent<HTMLSelectElement>) => setDayOffInMonth(e.target.value as '1' | '2')}
+              onChange={handleInputChange(setDayOffInMonth)}
             >
               <option value="1">1 Day (e.g., Sunday)</option>
               <option value="2">2 Days (e.g., Sat & Sun)</option>
@@ -1913,35 +2045,33 @@ const Salary = () => {
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <div>
             <label htmlFor="sss" className="block text-sm font-medium text-gray-700 mb-1">SSS</label>
-            <input type="number" id="sss" className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-purple-500 focus:border-purple-500" value={sss} onChange={(e) => setSss(e.target.value)} placeholder="0.00" />
+            <input type="number" id="sss" className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-purple-500 focus:border-purple-500" value={sss} onChange={handleInputChange(setSss)} placeholder="0.00" />
           </div>
           <div>
             <label htmlFor="philhealth" className="block text-sm font-medium text-gray-700 mb-1">Philhealth</label>
-            <input type="number" id="philhealth" className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-purple-500 focus:border-purple-500" value={philhealth} onChange={(e) => setPhilhealth(e.target.value)} placeholder="0.00" />
+            <input type="number" id="philhealth" className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-purple-500 focus:border-purple-500" value={philhealth} onChange={handleInputChange(setPhilhealth)} placeholder="0.00" />
           </div>
           <div>
             <label htmlFor="pagibig" className="block text-sm font-medium text-gray-700 mb-1">Pag-ibig</label>
-            <input type="number" id="pagibig" className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-purple-500 focus:border-purple-500" value={pagibig} onChange={(e) => setPagibig(e.target.value)} placeholder="0.00" />
+            <input type="number" id="pagibig" className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-purple-500 focus:border-purple-500" value={pagibig} onChange={handleInputChange(setPagibig)} placeholder="0.00" />
           </div>
           <div>
             <label htmlFor="tax" className="block text-sm font-medium text-gray-700 mb-1">Tax</label>
-            <input type="number" id="tax" className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-purple-500 focus:border-purple-500" value={tax} onChange={(e) => setTax(e.target.value)} placeholder="0.00" />
+            <input type="number" id="tax" className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-purple-500 focus:border-purple-500" value={tax} onChange={handleInputChange(setTax)} placeholder="0.00" />
           </div>
           <div>
             <label htmlFor="loans" className="block text-sm font-medium text-gray-700 mb-1">Loans</label>
-            <input type="number" id="loans" className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-purple-500 focus:border-purple-500" value={loans} onChange={(e) => setLoans(e.target.value)} placeholder="0.00" />
+            <input type="number" id="loans" className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-purple-500 focus:border-purple-500" value={loans} onChange={handleInputChange(setLoans)} placeholder="0.00" />
           </div>
           <div>
             <label htmlFor="voluntary" className="block text-sm font-medium text-gray-700 mb-1">Voluntary</label>
-            <input type="number" id="voluntary" className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-purple-500 focus:border-purple-500" value={voluntary} onChange={(e) => setVoluntary(e.target.value)} placeholder="0.00" />
+            <input type="number" id="voluntary" className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-purple-500 focus:border-purple-500" value={voluntary} onChange={handleInputChange(setVoluntary)} placeholder="0.00" />
           </div>
         </div>
 
         <button
           onClick={handleCalculateAndSave}
           className="mt-8 w-full bg-purple-600 text-white py-3 px-4 rounded-md hover:bg-purple-700 transition duration-300 ease-in-out transform hover:scale-105 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:ring-offset-2"
-          // Removed disabled={isLoading} and the inline spinner from the button
-          // The global spinner will cover the page
         >
           Save/Update Salary
         </button>
@@ -1972,6 +2102,7 @@ const Profile = () => {
   const [isEditing, setIsEditing] = useState(false);
   const [userName, setUserName] = useState(user?.displayName || '');
   const [userEmail, setUserEmail] = useState(user?.email || '');
+  const [phoneNumber, setPhoneNumber] = useState('');
   const [receiveEmailNotifications, setReceiveEmailNotifications] = useState(false);
   const [receivePhoneNotifications, setReceivePhoneNotifications] = useState(false);
 
@@ -1982,31 +2113,37 @@ const Profile = () => {
     setMessage('');
   };
 
-  // Fetch user profile details including notification settings
   useEffect(() => {
     const fetchProfileData = async () => {
-      if (!user) return;
+      if (!user || !db) return;
       try {
-        setGlobalIsLoading(true); // Start loading for data fetch
+        setGlobalIsLoading(true);
         const userDocRef = doc(db, `artifacts/${appId}/users/${user.uid}/profile/details`);
         const docSnap = await getDoc(userDocRef);
         if (docSnap.exists()) {
-          const data = docSnap.data();
+          const data = docSnap.data() as UserProfile;
           setUserName(data.name || user?.displayName || '');
           setUserEmail(data.email || user?.email || '');
+          setPhoneNumber(data.phoneNumber || '');
           setReceiveEmailNotifications(data.receiveEmailNotifications || false);
           setReceivePhoneNotifications(data.receivePhoneNotifications || false);
         } else {
-          // If no profile document exists, create a basic one
-          await setDoc(userDocRef, {
+          const initialProfileData: UserProfile = {
             name: user?.displayName || '',
             email: user?.email || '',
-            receiveEmailNotifications: false,
+            phoneNumber: '',
+            receiveEmailNotifications: true,
             receivePhoneNotifications: false,
             createdAt: serverTimestamp(),
-          });
+          };
+          await setDoc(userDocRef, initialProfileData);
+          setUserName(initialProfileData.name);
+          setUserEmail(initialProfileData.email);
+          setPhoneNumber(initialProfileData.phoneNumber);
+          setReceiveEmailNotifications(initialProfileData.receiveEmailNotifications);
+          setReceivePhoneNotifications(initialProfileData.receivePhoneNotifications);
         }
-      } catch (error: unknown) { // Explicitly type error
+      } catch (error: unknown) {
         let errorMessage = 'Error loading profile data.';
         if (error instanceof Error) {
           errorMessage = `Error loading profile data: ${error.message}`;
@@ -2015,7 +2152,7 @@ const Profile = () => {
         setMessageType('error');
         console.error('Error loading profile data:', error);
       } finally {
-        setGlobalIsLoading(false); // End loading
+        setGlobalIsLoading(false);
       }
     };
     fetchProfileData();
@@ -2029,15 +2166,13 @@ const Profile = () => {
 
   const handleCancelEdit = () => {
     setIsEditing(false);
-    // Reset to current user's display name and notification settings from state
-    setUserName(user?.displayName || '');
-    // Refetch the current notification settings from Firestore to ensure accurate reset
     const fetchCurrentSettings = async () => {
-      if (!user) return;
+      if (!user || !db) return;
       const userDocRef = doc(db, `artifacts/${appId}/users/${user.uid}/profile/details`);
       const docSnap = await getDoc(userDocRef);
       if (docSnap.exists()) {
-        const data = docSnap.data();
+        const data = docSnap.data() as UserProfile;
+        setPhoneNumber(data.phoneNumber || '');
         setReceiveEmailNotifications(data.receiveEmailNotifications || false);
         setReceivePhoneNotifications(data.receivePhoneNotifications || false);
       }
@@ -2057,29 +2192,29 @@ const Profile = () => {
     setMessage('');
 
     try {
-      if (user) {
-        // Update Firebase Auth profile
-        await updateProfile(user, { displayName: userName });
-
-        // Update the profile details document in Firestore
-        const userDocRef = doc(db, `artifacts/${appId}/users/${user.uid}/profile/details`);
-        await setDoc(userDocRef, {
-          name: userName,
-          email: user.email, // Preserve email, it's generally not updated this way
-          receiveEmailNotifications: receiveEmailNotifications,
-          receivePhoneNotifications: receivePhoneNotifications,
-          lastUpdated: serverTimestamp(),
-        }, { merge: true }); // Use merge to update specific fields without overwriting others
-
-        setMessage('Profile updated successfully!');
-        setMessageType('success');
-        setIsEditing(false);
-        setTimeout(() => setMessage(''), 3000);
-      } else {
-        setMessage('User not authenticated.');
+      if (!user || !db) {
+        setMessage('Firebase or user not initialized. Cannot save data.');
         setMessageType('error');
+        setGlobalIsLoading(false);
+        return;
       }
-    } catch (error: unknown) { // Explicitly type error
+      await updateProfile(user, { displayName: userName });
+
+      const userDocRef = doc(db, `artifacts/${appId}/users/${user.uid}/profile/details`);
+      const updatedProfileData: Partial<UserProfile> = {
+        name: userName,
+        phoneNumber: phoneNumber,
+        receiveEmailNotifications: receiveEmailNotifications,
+        receivePhoneNotifications: receivePhoneNotifications,
+        lastUpdated: serverTimestamp(),
+      };
+      await setDoc(userDocRef, updatedProfileData, { merge: true });
+
+      setMessage('Profile updated successfully!');
+      setMessageType('success');
+      setIsEditing(false);
+      setTimeout(() => setMessage(''), 3000);
+    } catch (error: unknown) {
       let errorMessage = 'Error updating profile.';
       if (error instanceof Error) {
         errorMessage = `Error updating profile: ${error.message}`;
@@ -2092,14 +2227,12 @@ const Profile = () => {
     }
   };
 
-  // State to hold total income and expenses for the dashboard summary part
   const [totalIncomeSummary, setTotalIncomeSummary] = useState(0);
   const [totalExpensesSummary, setTotalExpensesSummary] = useState(0);
   const netSavingsSummary = totalIncomeSummary - totalExpensesSummary;
 
-  // Fetch all incomes for total calculation
   useEffect(() => {
-    if (!user) {
+    if (!user || !db) {
       setTotalIncomeSummary(0);
       return;
     }
@@ -2113,9 +2246,8 @@ const Profile = () => {
     return () => unsubscribe();
   }, [user, db, appId]);
 
-  // Fetch all expenses for total calculation
   useEffect(() => {
-    if (!user) {
+    if (!user || !db) {
       setTotalExpensesSummary(0);
       return;
     }
@@ -2134,7 +2266,6 @@ const Profile = () => {
     <PageLayout title="Profile">
       <MessageBox message={message} type={messageType} onClose={closeMessageBox} />
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* Left Part: Profile Card */}
         <div className="bg-gray-50 p-6 rounded-lg shadow-sm border border-gray-200">
           <h3 className="text-xl font-semibold text-gray-800 mb-4">Your Information</h3>
           {isEditing ? (
@@ -2159,6 +2290,17 @@ const Profile = () => {
                   disabled
                 />
                 <p className="text-xs text-gray-500 mt-1">Email cannot be changed here.</p>
+              </div>
+              <div>
+                <label htmlFor="phoneNumber" className="block text-sm font-medium text-gray-700 mb-1">Phone Number (Optional)</label>
+                <input
+                  type="tel"
+                  id="phoneNumber"
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-purple-500 focus:border-purple-500"
+                  value={phoneNumber}
+                  onChange={(e) => setPhoneNumber(e.target.value)}
+                  placeholder="e.g., +639171234567"
+                />
               </div>
 
               <h4 className="text-lg font-semibold text-gray-800 mt-6 pt-4 border-t">Notification Settings</h4>
@@ -2214,6 +2356,9 @@ const Profile = () => {
                 <span className="font-medium text-gray-900">Email:</span> {user?.email || 'N/A'}
               </p>
               <p className="text-gray-700">
+                <span className="font-medium text-gray-900">Phone Number:</span> {phoneNumber || 'N/A'}
+              </p>
+              <p className="text-gray-700">
                 <span className="font-medium text-gray-900">User ID:</span> {user?.uid || 'N/A'}
               </p>
 
@@ -2237,7 +2382,6 @@ const Profile = () => {
           )}
         </div>
 
-        {/* Right Part: Dashboard Summary Cards */}
         <div className="bg-white p-4 rounded-lg shadow-md border-b-2 border-purple-500">
           <h3 className="text-xl font-semibold text-gray-800 mb-4 border-b pb-2">Your Financial Summary</h3>
           <div className="grid grid-cols-1 gap-4 mt-4">
@@ -2269,7 +2413,6 @@ const Profile = () => {
 
 /**
  * History Page Component
- * Allows users to view and download their financial history as a CSV.
  */
 const History = () => {
   const { user, db, appId, setIsLoading: setGlobalIsLoading } = useAuth();
@@ -2281,16 +2424,15 @@ const History = () => {
 
   const closeMessageBox = () => setMessage('');
 
-  // Fetch all expenses
   useEffect(() => {
-    if (!user) { setExpenses([]); return; }
+    if (!user || !db) { setExpenses([]); return; }
     const expensesCollectionRef = collection(db, `artifacts/${appId}/users/${user.uid}/expenses`);
     const unsubscribe = onSnapshot(expensesCollectionRef, (snapshot) => {
       setExpenses(snapshot.docs.map(doc => ({
         id: doc.id,
-        ...doc.data() as Omit<ExpenseEntry, 'id'>, // Omit 'id' to prevent duplicate key warning
-        expenseDate: doc.data().expenseDate instanceof Timestamp ? doc.data().expenseDate.toDate() : doc.data().expenseDate,
-        createdAt: doc.data().createdAt instanceof Timestamp ? doc.data().createdAt.toDate() : doc.data().createdAt // Ensure createdAt is converted to Date object
+        ...doc.data() as Omit<ExpenseEntry, 'id'>,
+        expenseDate: doc.data().expenseDate instanceof Timestamp ? doc.data().expenseDate.toDate() : doc.data().expenseDate as Date,
+        createdAt: doc.data().createdAt instanceof Timestamp ? doc.data().createdAt.toDate() : doc.data().createdAt as Date
       })));
     }, (error) => {
       console.error("Error fetching history expenses:", error);
@@ -2300,16 +2442,15 @@ const History = () => {
     return () => unsubscribe();
   }, [user, db, appId]);
 
-  // Fetch all incomes
   useEffect(() => {
-    if (!user) { setIncomes([]); return; }
+    if (!user || !db) { setIncomes([]); return; }
     const incomesCollectionRef = collection(db, `artifacts/${appId}/users/${user.uid}/incomes`);
     const unsubscribe = onSnapshot(incomesCollectionRef, (snapshot) => {
       setIncomes(snapshot.docs.map(doc => ({
         id: doc.id,
-        ...doc.data() as Omit<IncomeEntry, 'id'>, // Omit 'id' to prevent duplicate key warning
-        incomeDate: doc.data().incomeDate instanceof Timestamp ? doc.data().incomeDate.toDate() : doc.data().incomeDate,
-        createdAt: doc.data().createdAt instanceof Timestamp ? doc.data().createdAt.toDate() : doc.data().createdAt // Ensure createdAt is converted to Date object
+        ...doc.data() as Omit<IncomeEntry, 'id'>,
+        incomeDate: doc.data().incomeDate instanceof Timestamp ? doc.data().incomeDate.toDate() : doc.data().incomeDate as Date,
+        createdAt: doc.data().createdAt instanceof Timestamp ? doc.data().createdAt.toDate() : doc.data().createdAt as Date
       })));
     }, (error) => {
       console.error("Error fetching history incomes:", error);
@@ -2319,17 +2460,15 @@ const History = () => {
     return () => unsubscribe();
   }, [user, db, appId]);
 
-  // Fetch salary details
   useEffect(() => {
-    if (!user) { setSalaryDetails(null); return; }
+    if (!user || !db) { setSalaryDetails(null); return; }
     const salaryDocRef = doc(db, `artifacts/${appId}/users/${user.uid}/salary/details`);
     const unsubscribe = onSnapshot(salaryDocRef, (docSnap) => {
       if (docSnap.exists()) {
         const data = docSnap.data() as SalaryDetails;
         setSalaryDetails({
           ...data,
-          // Ensure lastUpdated is also converted if it's a Timestamp
-          lastUpdated: data.lastUpdated instanceof Timestamp ? data.lastUpdated.toDate() : data.lastUpdated
+          lastUpdated: data.lastUpdated instanceof Timestamp ? data.lastUpdated.toDate() : data.lastUpdated as Date
         });
       } else {
         setSalaryDetails(null);
@@ -2348,40 +2487,39 @@ const History = () => {
     if (type === 'expenses') {
       const headers = ['ID', 'Name', 'Category', 'Amount', 'Date', 'Added On'];
       csvRows.push(headers.join(','));
-      (data as ExpenseEntry[]).forEach(item => { // Type assertion
+      (data as ExpenseEntry[]).forEach(item => {
         const row = [
           item.id,
           item.name,
           item.category,
           item.expenseAmount,
-          item.expenseDate instanceof Date ? item.expenseDate.toLocaleDateString() : '', // Handle Date object
-          item.createdAt instanceof Date ? item.createdAt.toLocaleDateString() : '' // Handle Date object
+          (item.expenseDate instanceof Date || item.expenseDate instanceof Timestamp) ? (item.expenseDate instanceof Timestamp ? item.expenseDate.toDate().toLocaleDateString() : item.expenseDate.toLocaleDateString()) : '',
+          (item.createdAt instanceof Date || item.createdAt instanceof Timestamp) ? (item.createdAt instanceof Timestamp ? item.createdAt.toDate().toLocaleDateString() : item.createdAt.toLocaleDateString()) : ''
         ];
         csvRows.push(row.map(field => `"${String(field).replace(/"/g, '""')}"`).join(','));
       });
     } else if (type === 'incomes') {
       const headers = ['ID', 'Business Name', 'Industry', 'Amount', 'Date Received', 'Added On'];
       csvRows.push(headers.join(','));
-      (data as IncomeEntry[]).forEach(item => { // Type assertion
+      (data as IncomeEntry[]).forEach(item => {
         const row = [
           item.id,
           item.businessName,
           item.industry,
           item.incomeAmount,
-          item.incomeDate instanceof Date ? item.incomeDate.toLocaleDateString() : '', // Handle Date object
-          item.createdAt instanceof Date ? item.createdAt.toLocaleDateString() : '' // Handle Date object
+          (item.incomeDate instanceof Date || item.incomeDate instanceof Timestamp) ? (item.incomeDate instanceof Timestamp ? item.incomeDate.toDate().toLocaleDateString() : item.incomeDate.toLocaleDateString()) : '',
+          (item.createdAt instanceof Date || item.createdAt instanceof Timestamp) ? (item.createdAt instanceof Timestamp ? item.createdAt.toDate().toLocaleDateString() : item.createdAt.toLocaleDateString()) : ''
         ];
         csvRows.push(row.map(field => `"${String(field).replace(/"/g, '""')}"`).join(','));
       });
     } else if (type === 'salary') {
-      // Salary is a single object, format it differently
       const headers = [
         'Gross Salary', 'Frequency', 'Payday', 'Days Off Per Week',
         'SSS Deduction', 'Philhealth Deduction', 'Pag-ibig Deduction',
         'Tax Deduction', 'Loans Deduction', 'Voluntary Deduction', 'Last Updated'
       ];
       csvRows.push(headers.join(','));
-      const salaryData = data as SalaryDetails; // Type assertion
+      const salaryData = data as SalaryDetails;
       if (salaryData) {
         const row = [
           salaryData.salary || 0,
@@ -2394,7 +2532,7 @@ const History = () => {
           salaryData.tax || 0,
           salaryData.loans || 0,
           salaryData.voluntary || 0,
-          salaryData.lastUpdated instanceof Date ? salaryData.lastUpdated.toLocaleDateString() : '' // lastUpdated is now Date object
+          (salaryData.lastUpdated instanceof Date || salaryData.lastUpdated instanceof Timestamp) ? (salaryData.lastUpdated instanceof Timestamp ? salaryData.lastUpdated.toDate().toLocaleDateString() : salaryData.lastUpdated.toLocaleDateString()) : ''
         ];
         csvRows.push(row.map(field => `"${String(field).replace(/"/g, '""')}"`).join(','));
       }
@@ -2409,19 +2547,16 @@ const History = () => {
     try {
       let fullCSVContent = '';
 
-      // Add Expenses
       if (expenses.length > 0) {
         fullCSVContent += "--- Expenses ---\n";
         fullCSVContent += convertToCSV(expenses, 'expenses') + '\n\n';
       }
 
-      // Add Incomes
       if (incomes.length > 0) {
         fullCSVContent += "--- Incomes ---\n";
         fullCSVContent += convertToCSV(incomes, 'incomes') + '\n\n';
       }
 
-      // Add Salary Details
       if (salaryDetails) {
         fullCSVContent += "--- Salary Details ---\n";
         fullCSVContent += convertToCSV(salaryDetails, 'salary') + '\n\n';
@@ -2436,7 +2571,7 @@ const History = () => {
 
       const blob = new Blob([fullCSVContent], { type: 'text/csv;charset=utf-8;' });
       const link = document.createElement('a');
-      if (link.download !== undefined) { // feature detection
+      if (link.download !== undefined) {
         const url = URL.createObjectURL(blob);
         link.setAttribute('href', url);
         link.setAttribute('download', 'expense_tracker_history.csv');
@@ -2451,7 +2586,7 @@ const History = () => {
         setMessage('Your browser does not support downloading files directly.');
         setMessageType('error');
       }
-    } catch (error: unknown) { // Explicitly type error
+    } catch (error: unknown) {
       let errorMessage = 'Error generating CSV.';
       if (error instanceof Error) {
         errorMessage = `Error generating CSV: ${error.message}`;
@@ -2494,12 +2629,12 @@ const History = () => {
                   </tr>
                 </thead>
                 <tbody className="bg-white divide-y divide-gray-200">
-                  {expenses.map((expense: ExpenseEntry) => ( // Explicitly type expense
+                  {expenses.map((expense: ExpenseEntry) => (
                     <tr key={expense.id}>
                       <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">{expense.name}</td>
                       <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{expense.category}</td>
                       <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{expense.expenseAmount.toLocaleString('en-US', { style: 'currency', currency: 'USD' })}</td>
-                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{expense.expenseDate instanceof Date ? expense.expenseDate.toLocaleDateString() : 'N/A'}</td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{(expense.expenseDate instanceof Timestamp ? expense.expenseDate.toDate() : expense.expenseDate as Date)?.toLocaleDateString() || 'N/A'}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -2522,12 +2657,12 @@ const History = () => {
                   </tr>
                 </thead>
                 <tbody className="bg-white divide-y divide-gray-200">
-                  {incomes.map((income: IncomeEntry) => ( // Explicitly type income
+                  {incomes.map((income: IncomeEntry) => (
                     <tr key={income.id}>
                       <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">{income.businessName}</td>
                       <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{income.industry}</td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{(income.incomeDate instanceof Timestamp ? income.incomeDate.toDate() : income.incomeDate as Date)?.toLocaleDateString() || 'N/A'}</td>
                       <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{income.incomeAmount.toLocaleString('en-US', { style: 'currency', currency: 'USD' })}</td>
-                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{income.incomeDate instanceof Date ? income.incomeDate.toLocaleDateString() : 'N/A'}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -2585,38 +2720,43 @@ const History = () => {
  */
 const App = () => {
   const [user, setUser] = useState<User | null>(null);
-  const [loading, setLoading] = useState(true); // Initial app loading (authentication)
+  const [loading, setLoading] = useState(true);
   const [currentPage, setCurrentPage] = useState('dashboard');
   const [message, setMessage] = useState('');
   const [messageType, setMessageType] = useState<'success' | 'error' | 'info'>('info');
-  const [isGlobalLoading, setIsGlobalLoading] = useState(false); // New: Global loading state for full-page spinner
+  const [isGlobalLoading, setIsGlobalLoading] = useState(false);
+  const [isSidebarOpen, setIsSidebarOpen] = useState(false); // New state for sidebar
 
-  // States for dashboard data
   const [totalBankBalance, setTotalBankBalance] = useState(0);
   const [totalIncome, setTotalIncome] = useState(0);
   const [totalExpenses, setTotalExpenses] = useState(0);
   const [salaryDetails, setSalaryDetails] = useState<SalaryDetails | null>(null);
-  const [upcomingIncome, setUpcomingIncome] = useState(0); // Sum of future-dated incomes
-  const [monthlyNetCashFlow, setMonthlyNetCashFlow] = useState(0); // For forecasting
+  const [upcomingIncome, setUpcomingIncome] = useState(0);
+  const [monthlyNetCashFlow, setMonthlyNetCashFlow] = useState(0);
 
 
   useEffect(() => {
-    // Authenticate with custom token or anonymously on initial load
+    if (!auth) {
+      setMessage('Firebase Authentication is not initialized. Please check Firebase config and console for errors.');
+      setMessageType('error');
+      setLoading(false);
+      return;
+    }
+
     const signIn = async () => {
       try {
         if (initialAuthToken) {
           await signInWithCustomToken(auth, initialAuthToken);
           console.log("Signed in with custom token.");
         } else {
-          // If no custom token, try anonymous sign-in
-          await signInAnonymously(auth);
-          console.log("Signed in anonymously.");
+          // No anonymous sign-in, user will be directed to login/signup
+          console.log("No initial auth token. User will be directed to login/signup.");
         }
-      } catch (error: unknown) { // Explicitly type error
+      } catch (error: unknown) {
         setMessageType('error');
         let errorMessage = `Firebase Auth Error: ${(error as Error).message}`;
-        if (error instanceof Error) { // Use instanceof Error and check for 'code' property
-          const firebaseErrorCode = (error as { code?: string }).code; // Safely access code property
+        if (error instanceof Error) {
+          const firebaseErrorCode = (error as { code?: string }).code;
           if (firebaseErrorCode === 'auth/operation-not-allowed') {
             errorMessage = 'Authentication method (e.g., Anonymous or Email/Password) is not enabled in your Firebase project. Please check Firebase Console > Authentication > Sign-in method.';
           } else if (firebaseErrorCode === 'auth/api-key-not-valid') {
@@ -2628,33 +2768,27 @@ const App = () => {
         setMessage(errorMessage);
         console.error("Firebase initial sign-in error:", error);
       }
-      // Removed setLoading(false) from here. onAuthStateChanged will handle it.
     };
 
-    // Set up auth state change listener
     const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
       setUser(currentUser);
-      setLoading(false); // Set loading to false once auth state is definitively known
+      setLoading(false);
 
-      // Explicitly set page based on auth status
       if (currentUser) {
-        setCurrentPage('dashboard'); // If logged in, go to dashboard
+        setCurrentPage('dashboard');
       } else {
-        setCurrentPage('auth'); // If logged out, go to auth page
+        setCurrentPage('auth');
       }
     });
 
-    signIn(); // Call initial sign-in attempt
+    signIn();
 
-    // Clean up subscription on unmount
     return () => unsubscribe();
-  }, [auth, initialAuthToken]); // Removed `currentPage` from dependency array as we're explicitly setting it based on auth state
+  }, []);
 
 
-  // Effect to fetch all dashboard related data
-  // Moved this useEffect's content and its dependency array to ensure proper structure.
   useEffect(() => {
-    if (!user) {
+    if (!user || !db) {
       setTotalBankBalance(0);
       setTotalIncome(0);
       setTotalExpenses(0);
@@ -2664,26 +2798,24 @@ const App = () => {
       return;
     }
 
-    // Fetch total bank balance
     const unsubscribeBanks = onSnapshot(collection(db, `artifacts/${appId}/users/${user.uid}/banks`), (snapshot) => {
       const sum = snapshot.docs.reduce((acc, doc) => acc + (parseFloat(String(doc.data().amount)) || 0), 0);
       setTotalBankBalance(sum);
     }, (error) => console.error("Error fetching bank balance:", error));
 
-    // Fetch incomes and calculate total and upcoming
     const unsubscribeIncomes = onSnapshot(collection(db, `artifacts/${appId}/users/${user.uid}/incomes`), (snapshot) => {
       let currentTotal = 0;
       let currentUpcoming = 0;
       const today = new Date();
-      today.setHours(0, 0, 0, 0); // Normalize today's date to start of day
+      today.setHours(0, 0, 0, 0);
 
       snapshot.docs.forEach(doc => {
         const incomeAmount = parseFloat(String(doc.data().incomeAmount)) || 0;
         const incomeDate = doc.data().incomeDate instanceof Timestamp ? doc.data().incomeDate.toDate() : doc.data().incomeDate;
 
-        currentTotal += incomeAmount; // Sum all incomes for YTD total
+        currentTotal += incomeAmount;
 
-        if (incomeDate && incomeDate > today) {
+        if (incomeDate && (incomeDate instanceof Date) && incomeDate > today) {
           currentUpcoming += incomeAmount;
         }
       });
@@ -2691,19 +2823,16 @@ const App = () => {
       setUpcomingIncome(currentUpcoming);
     }, (error) => console.error("Error fetching incomes:", error));
 
-    // Fetch expenses and calculate total
     const unsubscribeExpenses = onSnapshot(collection(db, `artifacts/${appId}/users/${user.uid}/expenses`), (snapshot) => {
       const sum = snapshot.docs.reduce((acc, doc) => acc + (parseFloat(String(doc.data().expenseAmount)) || 0), 0);
       setTotalExpenses(sum);
     }, (error) => console.error("Error fetching expenses:", error));
 
-    // Fetch salary details
     const unsubscribeSalary = onSnapshot(doc(db, `artifacts/${appId}/users/${user.uid}/salary/details`), (docSnap) => {
       if (docSnap.exists()) {
-        const data = docSnap.data() as SalaryDetails; // Type assertion
+        const data = docSnap.data() as SalaryDetails;
         setSalaryDetails(data);
 
-        // Calculate estimated monthly net income for forecast
         const grossSalary = parseFloat(String(data.salary)) || 0;
         const sss = parseFloat(String(data.sss)) || 0;
         const philhealth = parseFloat(String(data.philhealth)) || 0;
@@ -2746,14 +2875,17 @@ const App = () => {
 
 
   const handleLogout = async () => {
-    setIsGlobalLoading(true); // Use global loading for logout
+    setIsGlobalLoading(true);
     try {
-      await signOut(auth);
-      setMessage('Logged out successfully.');
-      setMessageType('success');
-      // The onAuthStateChanged listener will now handle setting currentPage to 'auth'
-      setTimeout(() => setMessage(''), 3000); // Clear message after 3 seconds
-    } catch (error: unknown) { // Explicitly type error
+      if (auth) {
+        await signOut(auth);
+        setMessage('Logged out successfully.');
+        setMessageType('success');
+        setTimeout(() => setMessage(''), 3000);
+      } else {
+        setMessage('Firebase Authentication is not initialized. Cannot logout.');
+      }
+    } catch (error: unknown) {
       let errorMessage = 'Logout failed.';
       if (error instanceof Error) {
         errorMessage = `Logout failed: ${error.message}`;
@@ -2770,19 +2902,31 @@ const App = () => {
     setMessage('');
   };
 
-  // Determine current page to render
+  const toggleSidebar = () => {
+    setIsSidebarOpen(!isSidebarOpen);
+  };
+
   const renderPage = () => {
-    if (loading) { // This `loading` state is for initial Firebase auth.
-      console.log("App: Rendering LoadingSpinner (Auth initialization in progress)");
+    if (!app || !auth || !db) {
+      return (
+        <div className="flex justify-center items-center h-screen bg-red-50">
+          <MessageBox
+            message="A critical error occurred: Firebase could not be initialized. Please check your Firebase configuration and network connection. See console for details."
+            type="error"
+            onClose={() => {}}
+          />
+        </div>
+      );
+    }
+
+    if (loading) {
       return <LoadingSpinner />;
     }
 
     if (!user) {
-      console.log("App: User not authenticated, rendering Auth component.");
       return <Auth />;
     }
 
-    console.log(`App: User authenticated, rendering page: ${currentPage}`);
     switch (currentPage) {
       case 'dashboard':
         return <Dashboard />;
@@ -2796,35 +2940,53 @@ const App = () => {
         return <Expenses />;
       case 'profile':
         return <Profile />;
-      case 'history': // Add the new History page
+      case 'history':
         return <History />;
       default:
-        console.warn(`App: Unknown currentPage '${currentPage}', defaulting to Dashboard.`);
-        return <Dashboard />; // Default to dashboard if unknown page
+        return <Dashboard />;
     }
   };
 
   return (
-    // Provide setIsGlobalLoading via AuthContext, along with new dashboard data states
     <AuthContext.Provider value={{ user, handleLogout, db, appId, setIsLoading: setIsGlobalLoading, totalBankBalance, totalIncome, totalExpenses, salaryDetails, upcomingIncome, monthlyNetCashFlow }}>
       <div className="min-h-screen bg-gray-100 font-sans text-gray-900">
         <style>
           {`
-            /* @import rule must precede all other statements in a stylesheet */
             @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
 
             body {
               font-family: 'Inter', sans-serif;
             }
+
+            /* Tailwind custom animation for fade-in effect */
+            @keyframes fadeIn {
+              from { opacity: 0; }
+              to { opacity: 1; }
+            }
+            .animate-fade-in {
+              animation: fadeIn 0.3s ease-out forwards;
+            }
           `}
         </style>
         <script src="https://cdn.tailwindcss.com"></script>
-        {user && <Navbar setCurrentPage={setCurrentPage} user={user} />}
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/recharts/2.12.0/recharts.min.js"></script>
+
+        {user && <Navbar toggleSidebar={toggleSidebar} user={user} />}
+        {user && (
+          <Sidebar
+            isOpen={isSidebarOpen}
+            onClose={() => setIsSidebarOpen(false)}
+            setCurrentPage={setCurrentPage}
+            user={user}
+            handleLogout={handleLogout}
+          />
+        )}
+
         <MessageBox message={message} type={messageType} onClose={closeMessageBox} />
         <main className="flex-grow p-4">
           {renderPage()}
         </main>
-        {isGlobalLoading && <FullPageSpinnerOverlay />} {/* Render full-page spinner if isGlobalLoading is true */}
+        {isGlobalLoading && <FullPageSpinnerOverlay />}
       </div>
     </AuthContext.Provider>
   );
